@@ -1,0 +1,170 @@
+import streamlit as st
+import os
+import traceback
+
+# -----------------------------
+# Safety checks: create folders if missing
+# -----------------------------
+if not os.path.exists("images"):
+    os.makedirs("images")
+if not os.path.exists("answer_keys"):
+    os.makedirs("answer_keys")
+
+# Optional: catch all errors so Streamlit doesn't stop silently
+try:
+    # -----------------------------
+    # Your full Streamlit code starts here
+    # -----------------------------
+
+    st.set_page_config(page_title="OMR Auto-Correction", layout="wide")
+    st.title("OMR Auto-Correction & Marks Export System")
+
+    # Rest of your code...
+    # file upload, processing, scoring, export, etc.
+
+except Exception as e:
+    st.error("Error occurred! Check terminal for details.")
+    print(traceback.format_exc())
+
+import os
+
+# Ensure 'images' folder exists
+if not os.path.exists("images"):
+    os.makedirs("images")
+
+
+import os
+
+# Absolute path to the 'images' folder
+images_path = os.path.join(os.getcwd(), "images")
+
+# Check if 'images' exists
+if os.path.exists(images_path):
+    if os.path.isfile(images_path):
+        # If it's a file, remove it and make a folder
+        os.remove(images_path)
+        os.makedirs(images_path)
+        print("Replaced file 'images' with a folder.")
+    else:
+        print("'images' folder already exists.")
+else:
+    # Create the folder if it doesn't exist
+    os.makedirs(images_path)
+    print("Created 'images' folder.")
+
+
+
+
+import streamlit as st
+import cv2
+import numpy as np
+import pandas as pd
+import os
+
+st.set_page_config(page_title="OMR Auto-Correction", layout="wide")
+st.title("OMR Auto-Correction & Marks Export System")
+st.title("OMR Auto-Correction & Marks Export System")
+
+# --------- Upload OMR Images ---------
+st.sidebar.header("Upload OMR Images")
+uploaded_files = st.sidebar.file_uploader(
+    "Upload OMR images (png, jpg, jpeg)", 
+    type=['png', 'jpg', 'jpeg'], 
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    for file in uploaded_files:
+        file_path = os.path.join("images", file.name)
+        with open(file_path, "wb") as f:
+            f.write(file.getbuffer())
+    st.sidebar.success(f"Uploaded {len(uploaded_files)} files to 'images/' folder")
+
+
+# --------- Helper Functions ---------
+def load_answer_key(file_path):
+    return pd.read_csv(file_path, index_col=0, header=None, squeeze=True).to_dict()
+
+def sort_contours(cnts, method="top-to-bottom"):
+    reverse = False
+    i = 0
+    if method == "right-to-left" or method == "bottom-to-top":
+        reverse = True
+    if method == "top-to-bottom" or method == "bottom-to-top":
+        i = 1
+    bounding_boxes = [cv2.boundingRect(c) for c in cnts]
+    cnts, bounding_boxes = zip(*sorted(zip(cnts, bounding_boxes), key=lambda b: b[1][i], reverse=reverse))
+    return cnts
+
+def process_omr(images_path, answer_key):
+    img = cv2.imread(images_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    _, thresh = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    bubbles = [c for c in contours if cv2.contourArea(c) > 100]
+    bubbles = sort_contours(bubbles, method="top-to-bottom")
+    
+    # Group bubbles per question (assume 4 options)
+    questions = []
+    for i in range(0, len(bubbles), 4):
+        questions.append(bubbles[i:i+4])
+    
+    # Detect filled bubbles
+    options = ['A','B','C','D']
+    answers = {}
+    score = 0
+    for q_idx, q_bubbles in enumerate(questions, start=1):
+        filled = None
+        max_val = 0
+        for opt_idx, bubble in enumerate(q_bubbles):
+            mask = np.zeros(gray.shape, dtype="uint8")
+            cv2.drawContours(mask, [bubble], -1, 255, -1)
+            total = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
+            if total > max_val:
+                max_val = total
+                filled = options[opt_idx]
+        answers[q_idx] = filled
+        if answer_key.get(q_idx) == filled:
+            score += 1
+    return score
+
+# --------- User Inputs ---------
+subject_folders = [f for f in os.listdir("images") if os.path.isdir(os.path.join("images", f))]
+st.sidebar.header("Select Subjects & Upload Folders")
+selected_subjects = st.sidebar.multiselect("Subjects", subject_folders)
+
+student_scores = {}  # {student_name: {subject: score}}
+
+for subject in selected_subjects:
+    st.subheader(f"Processing {subject}")
+    answer_key_path = f"answer_keys/{subject}.csv"
+    answer_key = load_answer_key(answer_key_path)
+    
+    subject_path = os.path.join("images", subject)
+
+    for file_name in os.listdir(subject_path):
+        if file_name.endswith((".png",".jpg",".jpeg")):
+            student_name = os.path.splitext(file_name)[0]
+            image_path = os.path.join(subject_path, file_name)
+            score = process_omr(image_path, answer_key)
+            
+            if student_name not in student_scores:
+                student_scores[student_name] = {}
+            student_scores[student_name][subject] = score
+            st.write(f"{student_name} → {subject}: {score}/{len(answer_key)}")
+
+# --------- Convert to DataFrame ---------
+df = pd.DataFrame(student_scores).T.fillna(0)
+df['Total'] = df.sum(axis=1)
+df['Rank'] = df['Total'].rank(ascending=False, method='min').astype(int)
+df = df.sort_values(by='Rank')
+
+st.subheader("Final Marks Table")
+st.dataframe(df)
+
+# --------- Export to Excel ---------
+export_file = "marks_list.xlsx"
+df.to_excel(export_file)
+st.success(f"Marks exported to {export_file}")
+st.download_button("Download Excel", export_file)
